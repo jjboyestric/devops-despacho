@@ -1,0 +1,89 @@
+name: Deploy Back Despachos to EC2
+
+on:
+  push:
+    branches:
+      - deploy
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar codigo del repositorio
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesion en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Construir imagen Docker de back-despachos
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/back-despachos:latest .
+
+      - name: Publicar imagen en Docker Hub
+        run: docker push ${{ secrets.DOCKER_USERNAME }}/back-despachos:latest
+
+      - name: Desplegar back-despachos en EC2 Backend via Bastion
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.BACKEND_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+
+          proxy_host: ${{ secrets.FRONTEND_HOST }}
+          proxy_username: ${{ secrets.EC2_USER }}
+          proxy_key: ${{ secrets.EC2_SSH_KEY }}
+
+          script: |
+            mkdir -p ~/app/back-despachos
+            cd ~/app/back-despachos
+
+            cat > docker-compose.yml << 'EOF'
+            services:
+              back-despachos:
+                image: juanjoelproxdlol/back-despachos:latest
+                container_name: back-despachos-app
+                ports:
+                  - "8082:8080"
+                environment:
+                  DB_ENDPOINT: mysql-despachos
+                  DB_PORT: 3306
+                  DB_NAME: despachosdb
+                  DB_USERNAME: despachosuser
+                  DB_PASSWORD: despachospass
+                depends_on:
+                  mysql-despachos:
+                    condition: service_healthy
+                restart: always
+
+              mysql-despachos:
+                image: mysql:8
+                container_name: mysql-despachos
+                environment:
+                  MYSQL_DATABASE: despachosdb
+                  MYSQL_USER: despachosuser
+                  MYSQL_PASSWORD: despachospass
+                  MYSQL_ROOT_PASSWORD: rootpass
+                volumes:
+                  - despachos_data:/var/lib/mysql
+                restart: always
+                healthcheck:
+                  test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "despachosuser", "-pdespachospass"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 10
+                  start_period: 30s
+
+            volumes:
+              despachos_data:
+            EOF
+
+            sudo docker pull juanjoelproxdlol/back-despachos:latest
+            sudo docker compose down || true
+            sudo docker compose up -d
+            sudo docker image prune -f
